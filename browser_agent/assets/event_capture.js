@@ -67,13 +67,35 @@
         /**
          * Returns a handler for the given event type.
          */
+        // Interactive tags worth recording
+        var INTERACTIVE_TAGS = ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON', 'A'];
+
         function makeHandler(eventType) {
             return function (e) {
                 try {
                     var target = e.target;
                     if (!target || !target.tagName) return;
 
-                    var data = extractElementData(target);
+                    // Skip non-interactive elements (labels, divs, spans, etc.)
+                    // For click events, walk up the DOM to find the nearest
+                    // interactive ancestor if the direct target isn't interactive
+                    var interactiveTarget = target;
+                    if (eventType === 'click' && INTERACTIVE_TAGS.indexOf(target.tagName) === -1) {
+                        var node = target.parentElement;
+                        while (node && node !== document.body) {
+                            if (INTERACTIVE_TAGS.indexOf(node.tagName) !== -1) {
+                                interactiveTarget = node;
+                                break;
+                            }
+                            node = node.parentElement;
+                        }
+                        // If still not interactive, skip this event
+                        if (INTERACTIVE_TAGS.indexOf(interactiveTarget.tagName) === -1) {
+                            return;
+                        }
+                    }
+
+                    var data = extractElementData(interactiveTarget);
                     data.event_type = eventType;
                     data.timestamp = Date.now();
                     data.page_url = window.location.href;

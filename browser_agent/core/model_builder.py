@@ -538,6 +538,13 @@ class ModelBuilder:
                 # Both aria_label and placeholder match textbox name
                 locators.append(LocatorSpec(strategy="aria_label", value=name, confidence=0.95))
                 locators.append(LocatorSpec(strategy="placeholder", value=name, confidence=0.85))
+                # If the name suggests a password field, add an unambiguous CSS fallback
+                if "password" in name.lower():
+                    locators.append(LocatorSpec(
+                        strategy="css_name",
+                        value='input[type="password"]',
+                        confidence=0.88
+                    ))
             elif role == "button":
                 element_type = "button"
                 locators.append(LocatorSpec(strategy="role", value=f"button:{name}", confidence=0.90))

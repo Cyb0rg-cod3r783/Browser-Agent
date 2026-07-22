@@ -24,7 +24,7 @@ class TestExecutor:
         self.headless = headless
         self.parallel_tests = int(os.environ.get("PARALLEL_TESTS", "4"))
         self.navigation_timeout_ms = int(
-            os.environ.get("NAVIGATION_TIMEOUT_MS", "10000")
+            os.environ.get("NAVIGATION_TIMEOUT_MS", "60000")
         )
 
     async def run_suite(self, app_id: str) -> list[TestResult]:
@@ -66,14 +66,31 @@ class TestExecutor:
         results: list[TestResult] = []
         semaphore = asyncio.Semaphore(self.parallel_tests)
 
-        async def run_with_semaphore(tc: TestCase) -> TestResult:
+        total = len(test_cases)
+        completed = 0
+        results = []
+
+        async def run_and_log(tc: TestCase) -> TestResult:
+            nonlocal completed
             async with semaphore:
                 flow = flows_map.get(tc.flow_id)
                 start_url = flow.start_url if flow else app.base_url
-                return await self.run_test(tc, elements_map, run_id, start_url)
+                result = await self.run_test(tc, elements_map, run_id, start_url)
+                completed += 1
+                status_icon = "✓" if result.status == "passed" else ("✗" if result.status == "failed" else "⚠")
+                print(f"[{completed}/{total}] {status_icon} {result.status.upper():8s} | {result.test_name} ({result.duration_ms}ms)", flush=True)
+                if result.status in ("failed", "errored"):
+                    if result.error_detail:
+                        print(f"         ERROR: {result.error_detail[:120]}", flush=True)
+                    elif result.step_results:
+                        for sr in result.step_results:
+                            if sr.status in ("failed", "errored") and sr.error:
+                                print(f"         STEP {sr.sequence} [{sr.element_label}]: {sr.error[:120]}", flush=True)
+                return result
 
-        tasks = [run_with_semaphore(tc) for tc in test_cases]
-        results = await asyncio.gather(*tasks)
+        print(f"\n▶ Starting test suite: {total} tests (parallelism={self.parallel_tests})\n", flush=True)
+        tasks = [run_and_log(tc) for tc in test_cases]
+        results = list(await asyncio.gather(*tasks))
 
         # Tally results
         passed = sum(1 for r in results if r.status == "passed")

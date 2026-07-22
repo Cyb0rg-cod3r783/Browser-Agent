@@ -92,6 +92,14 @@ def generate_locators(element_attrs: dict) -> list[LocatorSpec]:
             confidence=0.55
         ))
 
+    # 5b. password type (confidence 0.88) — input[type="password"] is unambiguous
+    if type_attr == "password":
+        locators.append(LocatorSpec(
+            strategy="css_name",
+            value='input[type="password"]',
+            confidence=0.88
+        ))
+
     # 6. xpath_text (confidence 0.40) — //button[contains(text(),"X")]
     if text_content and tag:
         safe_text = text_content[:50].replace('"', '\\"')

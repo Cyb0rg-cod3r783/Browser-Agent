@@ -19,7 +19,7 @@ class Config:
     GROQ_FAST_MODEL: str = os.environ.get("GROQ_FAST_MODEL", "llama-3.1-8b-instant")
     MAX_LLM_RETRIES: int = int(os.environ.get("MAX_LLM_RETRIES", "3"))
     LOCATOR_TIMEOUT_MS: int = int(os.environ.get("LOCATOR_TIMEOUT_MS", "3000"))
-    NAVIGATION_TIMEOUT_MS: int = int(os.environ.get("NAVIGATION_TIMEOUT_MS", "10000"))
+    NAVIGATION_TIMEOUT_MS: int = int(os.environ.get("NAVIGATION_TIMEOUT_MS", "60000"))
     PARALLEL_TESTS: int = int(os.environ.get("PARALLEL_TESTS", "4"))
 
 
