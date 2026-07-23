@@ -193,9 +193,11 @@ async def resolve_locator(
     for spec in sorted_locators:
         try:
             loc = _build_playwright_locator(page, spec)
-            # Use .first to avoid Playwright strict mode errors when a locator matches multiple elements
+            # Use .first to avoid strict mode; then wait_for(state="visible") which
+            # does NOT re-evaluate strict mode globally — safe even if the raw
+            # locator matches multiple elements (e.g. "Designation" in nav + form).
             first_loc = loc.first
-            await expect(first_loc).to_be_visible(timeout=timeout_ms)
+            await first_loc.wait_for(state="visible", timeout=timeout_ms)
             return (first_loc, spec.strategy)
         except Exception:
             continue
@@ -220,8 +222,8 @@ async def resolve_locator(
             fallback_spec = LocatorSpec(strategy=strategy, value=value, confidence=0.5)
 
         loc = _build_playwright_locator(page, fallback_spec)
-        await expect(loc).to_be_visible(timeout=timeout_ms)
-        return (loc, "llm_fallback")
+        await loc.first.wait_for(state="visible", timeout=timeout_ms)
+        return (loc.first, "llm_fallback")
     except Exception as e:
         raise ElementNotFoundError(
             f"Could not find element '{element.semantic_label}': {e}"

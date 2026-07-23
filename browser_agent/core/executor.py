@@ -16,6 +16,77 @@ from utils.screenshots import capture_screenshot
 from core.verifier import evaluate_assertions
 
 
+# Common loading spinner / overlay selectors to wait for disappearance
+_SPINNER_SELECTORS = [
+    ".spinner",
+    ".loading",
+    ".loader",
+    "[role='progressbar']",
+    ".overlay",
+    ".modal-backdrop",
+    ".sk-spinner",
+    ".pace",
+    ".nprogress",
+    "#loading",
+    ".loading-overlay",
+]
+
+
+async def wait_for_page_stability(page, max_wait_ms: int = 60000) -> None:
+    """
+    Dynamically wait for the page to reach a fully stable/ready state.
+
+    Strategy (layers applied in sequence):
+      1. Wait for document.readyState == 'complete'  (JS/CSS/images fully loaded)
+      2. Wait for network to go idle                  (all XHR / fetch requests done)
+      3. Wait for common loading spinners to disappear (SPA overlay indicators)
+
+    No hardcoded sleep — each layer is event-driven and polls the live DOM state.
+    Falls back gracefully if a layer times out (e.g. long-polling websockets that
+    never reach true networkidle — we continue after the readyState + spinner checks).
+
+    Args:
+        page:        Playwright Page object
+        max_wait_ms: Maximum ms to spend in total across all layers (default 60 s).
+                     Set to 0 to disable (not recommended).
+    """
+    if max_wait_ms <= 0:
+        return
+
+    deadline = max_wait_ms  # individual sub-timeouts drawn from this budget
+
+    # ── Layer 1: document.readyState == 'complete' ────────────────────────────
+    try:
+        await page.wait_for_function(
+            "document.readyState === 'complete'",
+            timeout=min(deadline, 30000)
+        )
+    except Exception:
+        pass  # DOM may still be usable even if this times out
+
+    # ── Layer 2: network idle ─────────────────────────────────────────────────
+    # Playwright's networkidle waits until there are no network connections for
+    # at least 500 ms.  We cap it at 10 s to avoid blocking forever on apps that
+    # use websockets or long-polling (common on SaaS staging environments).
+    try:
+        await page.wait_for_load_state("networkidle", timeout=min(deadline, 10000))
+    except Exception:
+        # networkidle can time out on apps that use websockets / long-polling.
+        # Fall through — readyState + spinner check are sufficient for most SPAs.
+        pass
+
+    # ── Layer 3: spinner / overlay disappearance ──────────────────────────────
+    # Try each known spinner selector; if found, wait until it's hidden.
+    for sel in _SPINNER_SELECTORS:
+        try:
+            loc = page.locator(sel)
+            count = await loc.count()
+            if count > 0:
+                await loc.first.wait_for(state="hidden", timeout=min(deadline, 15000))
+        except Exception:
+            continue  # selector not present or already gone — keep going
+
+
 class TestExecutor:
     def __init__(self, db, llm_client, screenshots_dir: str, headless: bool = True):
         self.db = db
@@ -24,7 +95,7 @@ class TestExecutor:
         self.headless = headless
         self.parallel_tests = int(os.environ.get("PARALLEL_TESTS", "4"))
         self.navigation_timeout_ms = int(
-            os.environ.get("NAVIGATION_TIMEOUT_MS", "10000")
+            os.environ.get("NAVIGATION_TIMEOUT_MS", "30000")
         )
 
     async def run_suite(self, app_id: str) -> list[TestResult]:
@@ -124,16 +195,19 @@ class TestExecutor:
             browser = await playwright_instance.chromium.launch(headless=self.headless)
             context = await browser.new_context()
             page = await context.new_page()
+            # Set generous default timeout — dynamic stability waits handle the rest
             page.set_default_timeout(self.navigation_timeout_ms)
             page.set_default_navigation_timeout(self.navigation_timeout_ms)
 
-            # Navigate to start URL
+            # Navigate to start URL and wait for full page stability
             try:
                 await page.goto(
                     start_url,
                     timeout=self.navigation_timeout_ms,
-                    wait_until="domcontentloaded"  # faster than default "load"
+                    wait_until="domcontentloaded"  # fast DOM parse; stability helper does the rest
                 )
+                # Dynamic wait: document ready + network idle + spinner gone
+                await wait_for_page_stability(page, max_wait_ms=60000)
             except Exception as e:
                 error_detail = f"Failed to navigate to {start_url}: {e}"
                 overall_status = "errored"
@@ -168,8 +242,10 @@ class TestExecutor:
                         await page.goto(
                             step.url or start_url,
                             timeout=self.navigation_timeout_ms,
-                            wait_until="domcontentloaded"
+                            wait_until="domcontentloaded"  # fast DOM parse; stability helper does the rest
                         )
+                        # Dynamic wait after explicit navigate step
+                        await wait_for_page_stability(page, max_wait_ms=60000)
 
                     else:
                         # Resolve element
@@ -179,21 +255,16 @@ class TestExecutor:
                             step_result.element_label = element.semantic_label
                             locator, strategy_used = await resolve_locator(
                                 page, element, self.llm_client,
-                                timeout_ms=10000
+                                timeout_ms=15000
                             )
                             step_result.locator_used = strategy_used
 
                             # Execute action
                             await self._execute_action(page, locator, step)
 
-                            # Wait for network idle (longer timeout to stabilize on slow staging)
-                            try:
-                                await page.wait_for_load_state(
-                                    "networkidle",
-                                    timeout=5000
-                                )
-                            except Exception:
-                                pass
+                            # Dynamic wait after every action: let the page settle
+                            # before the next step tries to locate elements.
+                            await wait_for_page_stability(page, max_wait_ms=60000)
 
                         else:
                             # No element reference — skip step

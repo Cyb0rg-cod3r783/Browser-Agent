@@ -23,7 +23,7 @@ class LLMClient:
     def __init__(self, db_path: str = "./browser_agent.db"):
         self.client = AsyncGroq(api_key=os.environ.get("GROQ_API_KEY"))
         self.smart_model = os.environ.get(
-            "GROQ_SMART_MODEL", "qwen/qwen3-32b"
+            "GROQ_SMART_MODEL", "llama-3.3-70b-versatile"
         )
         self.fast_model = os.environ.get(
             "GROQ_FAST_MODEL", "llama-3.1-8b-instant"
@@ -79,8 +79,8 @@ class LLMClient:
             return text
 
     @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
+        stop=stop_after_attempt(6),
+        wait=wait_exponential(multiplier=2, min=4, max=65),
         retry=retry_if_exception_type((
             groq_module.RateLimitError,
             groq_module.APIStatusError,

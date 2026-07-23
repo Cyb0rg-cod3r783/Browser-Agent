@@ -4,6 +4,7 @@ core/model_builder.py — Converts raw session events into structured Applicatio
 import json
 import re
 import uuid
+import asyncio
 from datetime import datetime, date, timezone
 
 from schema import (
@@ -363,6 +364,7 @@ class ModelBuilder:
             tag = self._role_to_html_tag(role_name)
             input_type = "text" if role_name == "textbox" else ""
 
+            await asyncio.sleep(0.2)
             label_result = await llm_client.generate(
                 ELEMENT_LABEL_PROMPT.format(
                     tag=tag,

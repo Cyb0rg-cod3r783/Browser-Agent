@@ -260,14 +260,29 @@ async def _run_tests(app_name: str, headless: bool, suite: str | None):
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     html_path = str(Path(reports_dir) / f"{app_name}_{timestamp}.html")
     json_path = str(Path(reports_dir) / f"{app_name}_{timestamp}.json")
+    excel_path = str(Path(reports_dir) / f"{app_name}_{timestamp}.xlsx")
 
     with console.status("Generating reports..."):
         await generate_html_report(run_id, results, db, html_path)
         generate_json_report(run_id, results, json_path, app_name)
+        
+        # Generate Excel report
+        try:
+            from reporting.excel_reporter import generate_excel_report
+            await generate_excel_report(run_id, results, db, excel_path, app_name)
+            
+            # Save a copy to the root workspace
+            root_excel_path = f"./{app_name}_test_report.xlsx"
+            import shutil
+            shutil.copy2(excel_path, root_excel_path)
+            latest_excel_msg = f" (latest: [link]{root_excel_path}[/link])"
+        except Exception as e:
+            latest_excel_msg = f" (failed to generate Excel: {e})"
 
     console.print(f"\n[bold green]📄 Reports generated:[/bold green]")
     console.print(f"  HTML: [link]{html_path}[/link]")
     console.print(f"  JSON: [link]{json_path}[/link]")
+    console.print(f"  Excel: [link]{excel_path}[/link]{latest_excel_msg}")
     console.print(f"\n[dim]Run:[/dim] python agent.py report --app {app_name}")
 
 
@@ -370,12 +385,13 @@ async def _relearn(app_name: str):
 @cli.command()
 @click.option("--app", required=True, help="Application name")
 @click.option("--run", default=None, help="Specific run ID (default: last run)")
-def report(app: str, run: str):
-    """Open the HTML report for the last test run."""
-    asyncio.run(_report(app, run))
+@click.option("--excel", is_flag=True, help="Generate and open the Excel report instead of HTML")
+def report(app: str, run: str, excel: bool):
+    """Open the HTML or Excel report for the last test run."""
+    asyncio.run(_report(app, run, excel))
 
 
-async def _report(app_name: str, run_id: str | None):
+async def _report(app_name: str, run_id: str | None, excel: bool):
     db = _get_db()
     await db.initialize()
 
@@ -391,25 +407,49 @@ async def _report(app_name: str, run_id: str | None):
             return
         run_id = last_run["id"]
 
-    # Find most recent report file
     reports_dir = os.environ.get("REPORTS_DIR", "./reports")
-    report_files = list(Path(reports_dir).glob(f"{app_name}_*.html"))
+    
+    if excel:
+        # Check if an excel report exists for this app
+        excel_files = list(Path(reports_dir).glob(f"{app_name}_*.xlsx"))
+        if not excel_files:
+            # Generate the Excel report from database
+            console.print("[yellow]⚠ Excel report not found. Generating from database...[/yellow]")
+            results = await db.get_results_for_run(run_id)
+            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            excel_path = str(Path(reports_dir) / f"{app_name}_{timestamp}.xlsx")
+            from reporting.excel_reporter import generate_excel_report
+            await generate_excel_report(run_id, results, db, excel_path, app_name)
+            
+            # Save a copy to the root workspace
+            root_excel_path = f"./{app_name}_test_report.xlsx"
+            try:
+                import shutil
+                shutil.copy2(excel_path, root_excel_path)
+            except Exception:
+                pass
+            
+            target_report = excel_path
+        else:
+            target_report = str(max(excel_files, key=lambda f: f.stat().st_mtime))
+    else:
+        # HTML report
+        report_files = list(Path(reports_dir).glob(f"{app_name}_*.html"))
+        if not report_files:
+            console.print(f"[yellow]⚠ No HTML report found. Run 'test' first.[/yellow]")
+            return
+        target_report = str(max(report_files, key=lambda f: f.stat().st_mtime))
 
-    if not report_files:
-        console.print(f"[yellow]⚠ No HTML report found. Run 'test' first.[/yellow]")
-        return
+    console.print(f"[bold]Opening:[/bold] {target_report}")
 
-    latest_report = max(report_files, key=lambda f: f.stat().st_mtime)
-    console.print(f"[bold]Opening:[/bold] {latest_report}")
-
-    # Open in default browser
+    # Open in default browser/viewer
     import subprocess
     if sys.platform == "win32":
-        os.startfile(str(latest_report))
+        os.startfile(target_report)
     elif sys.platform == "darwin":
-        subprocess.run(["open", str(latest_report)])
+        subprocess.run(["open", target_report])
     else:
-        subprocess.run(["xdg-open", str(latest_report)])
+        subprocess.run(["xdg-open", target_report])
 
 
 # ─── diff ────────────────────────────────────────────────────────────────────
