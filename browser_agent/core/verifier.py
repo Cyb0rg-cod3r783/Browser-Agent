@@ -100,7 +100,7 @@ async def evaluate_assertions(
                 else:
                     # Treat as text search
                     try:
-                        locator = page.get_by_text(assertion.expected, exact=True)
+                        locator = page.get_by_text(assertion.expected, exact=False).first
                         await locator.wait_for(state="visible", timeout=1500)
                         visible = True
                         result["actual"] = "visible" if visible else "not found"
