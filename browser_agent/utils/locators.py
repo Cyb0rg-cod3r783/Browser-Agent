@@ -3,7 +3,7 @@ utils/locators.py — Multi-strategy locator generation + resolution.
 """
 import re
 import json
-from typing import Any
+from typing import Any, Optional
 
 from playwright.async_api import Page, expect, Error as PlaywrightError
 
@@ -110,12 +110,10 @@ def generate_locators(element_attrs: dict) -> list[LocatorSpec]:
         ))
 
     # 7. chained_css_role (confidence 0.90) — page.locator('#outer').getByRole('role')
-    #    Emitted when the event carries a 'chained_selector' attribute from the parser.
     chained_selector = element_attrs.get("chained_selector")
     chained_role = element_attrs.get("chained_role")
     if chained_selector and chained_role:
         chained_name = element_attrs.get("chained_name", "")
-        # Encode as  "#selector|role|name"  so the value stays a plain string
         chained_value = f"#{chained_selector}|{chained_role}|{chained_name or ''}"
         locators.append(LocatorSpec(
             strategy="chained_css_role",
@@ -123,7 +121,6 @@ def generate_locators(element_attrs: dict) -> list[LocatorSpec]:
             confidence=0.90
         ))
 
-    # Sort by confidence descending
     locators.sort(key=lambda l: l.confidence, reverse=True)
     return locators
 
@@ -133,7 +130,6 @@ def _build_playwright_locator(page: Page, spec: LocatorSpec):
     strategy = spec.strategy
     value = spec.value
 
-    # Strip ::nth=N suffix (used internally for disambiguation)
     nth = None
     if "::nth=" in value:
         value, nth_str = value.rsplit("::nth=", 1)
@@ -147,7 +143,6 @@ def _build_playwright_locator(page: Page, spec: LocatorSpec):
     elif strategy == "placeholder":
         loc = page.get_by_placeholder(value)
     elif strategy == "role":
-        # value format: "role:name"
         parts = value.split(":", 1)
         role = parts[0]
         name = parts[1] if len(parts) > 1 else None
@@ -157,16 +152,16 @@ def _build_playwright_locator(page: Page, spec: LocatorSpec):
             loc = page.get_by_role(role)
     elif strategy == "text":
         loc = page.get_by_text(value, exact=False)
+    elif strategy == "label":
+        loc = page.get_by_label(value)
     elif strategy == "id":
         loc = page.locator(f"#{value}")
     elif strategy in ("css_name", "xpath_text", "css"):
         loc = page.locator(value)
     elif strategy == "chained_css_role":
-        # value format: "#selector|role|name"
-        # Reconstruct: page.locator('#selector').getByRole('role', name='name')
         parts = value.split("|", 2)
-        outer_sel = parts[0]          # e.g. "#dvaddbutton"
-        inner_role = parts[1]         # e.g. "link"
+        outer_sel = parts[0]
+        inner_role = parts[1]
         inner_name = parts[2] if len(parts) > 2 else ""
         container = page.locator(outer_sel)
         if inner_name:
@@ -176,60 +171,211 @@ def _build_playwright_locator(page: Page, spec: LocatorSpec):
     else:
         loc = page.locator(value)
 
-    # Apply .nth() if specified
     if nth is not None:
         loc = loc.nth(nth)
 
     return loc
 
 
+async def _is_fillable(locator) -> bool:
+    """Return True if the locator points at an editable control."""
+    try:
+        tag = (await locator.evaluate("el => (el.tagName || '').toLowerCase()")).lower()
+        if tag in ("input", "textarea", "select"):
+            return True
+        editable = await locator.evaluate(
+            "el => !!(el.isContentEditable || el.getAttribute('contenteditable') === 'true' "
+            "|| el.getAttribute('role') === 'textbox' || el.getAttribute('role') === 'searchbox')"
+        )
+        return bool(editable)
+    except Exception:
+        return False
+
+
+async def _promote_to_fillable(page: Page, locator):
+    """
+    If locator resolved to a <label> or plain text node, try to find the
+    associated input/textarea so fill() does not blow up.
+    """
+    try:
+        tag = (await locator.evaluate("el => (el.tagName || '').toLowerCase()")).lower()
+    except Exception:
+        return locator
+
+    if tag in ("input", "textarea", "select"):
+        return locator
+
+    # label[for] → #id
+    if tag == "label":
+        try:
+            for_id = await locator.get_attribute("for")
+            if for_id:
+                candidate = page.locator(f"#{for_id}").first
+                if await candidate.count() > 0:
+                    return candidate
+        except Exception:
+            pass
+        try:
+            candidate = locator.locator("input, textarea, select").first
+            if await candidate.count() > 0:
+                return candidate
+        except Exception:
+            pass
+
+    # Nearby input after a label/text node
+    try:
+        candidate = locator.locator("xpath=following::input[1] | following::textarea[1]").first
+        if await candidate.count() > 0 and await candidate.is_visible():
+            return candidate
+    except Exception:
+        pass
+
+    return locator
+
+
+def _heuristic_specs(element: ElementModel) -> list[LocatorSpec]:
+    """
+    Build extra locator candidates from the semantic label / observed values
+    when stored locators fail (self-heal before calling the LLM).
+    """
+    label = (element.semantic_label or "").strip()
+    specs: list[LocatorSpec] = []
+    if not label:
+        return specs
+
+    # Common label variants (Company code ↔ Company Code *)
+    variants = {
+        label,
+        label.rstrip(" *"),
+        label.replace(" Input Field", "").strip(),
+        label.replace(" field", "").strip(),
+        label.replace(" Field", "").strip(),
+    }
+    # Title-case / lower variants
+    more = set()
+    for v in list(variants):
+        more.add(v.title())
+        more.add(v.lower())
+        more.add(v.capitalize())
+    variants |= more
+
+    for v in variants:
+        if not v:
+            continue
+        specs.append(LocatorSpec(strategy="placeholder", value=v, confidence=0.65))
+        specs.append(LocatorSpec(strategy="aria_label", value=v, confidence=0.64))
+        specs.append(LocatorSpec(strategy="label", value=v, confidence=0.63))
+        specs.append(LocatorSpec(strategy="role", value=f"textbox:{v}", confidence=0.60))
+
+    # Observed placeholder/value hints
+    for ov in (element.observed_values or [])[:5]:
+        if ov and len(ov) < 80:
+            specs.append(LocatorSpec(strategy="placeholder", value=ov, confidence=0.58))
+
+    return specs
+
+
+async def _try_spec(
+    page: Page,
+    spec: LocatorSpec,
+    timeout_ms: int,
+    require_fillable: bool,
+) -> Optional[Any]:
+    """Try one locator spec; return locator or None."""
+    try:
+        loc = _build_playwright_locator(page, spec)
+        first_loc = loc.first
+        await expect(first_loc).to_be_visible(timeout=timeout_ms)
+        if require_fillable:
+            first_loc = await _promote_to_fillable(page, first_loc)
+            if not await _is_fillable(first_loc):
+                return None
+            # Ensure still visible after promotion
+            await expect(first_loc).to_be_visible(timeout=min(2000, timeout_ms))
+        return first_loc
+    except Exception:
+        return None
+
+
 async def resolve_locator(
     page: Page,
     element: ElementModel,
     llm_client,
-    timeout_ms: int = 3000
+    timeout_ms: int = 60000,
+    require_fillable: bool = False,
 ) -> tuple[Any, str]:
     """
     Try each locator in element.locators sorted by confidence descending.
-    Falls back to LLM if all fail. Raises ElementNotFoundError if LLM also fails.
-    
+    Then try heuristic label-based locators. Finally fall back to LLM.
+    Raises ElementNotFoundError if all fail.
+
     Returns: (playwright_locator, strategy_name)
     """
-    # Sort by confidence (highest first)
     sorted_locators = sorted(element.locators, key=lambda l: l.confidence, reverse=True)
 
     for spec in sorted_locators:
-        try:
-            loc = _build_playwright_locator(page, spec)
-            # Use .first to avoid Playwright strict mode errors when a locator matches multiple elements
-            first_loc = loc.first
-            await expect(first_loc).to_be_visible(timeout=timeout_ms)
-            return (first_loc, spec.strategy)
-        except Exception:
-            continue
+        loc = await _try_spec(page, spec, timeout_ms, require_fillable)
+        if loc is not None:
+            return (loc, spec.strategy)
 
-    # All locators failed — use LLM fallback
+    # Heuristic self-heal from semantic label (before expensive LLM call)
+    for spec in _heuristic_specs(element):
+        loc = await _try_spec(page, spec, min(timeout_ms, 4000), require_fillable)
+        if loc is not None:
+            return (loc, f"heuristic_{spec.strategy}")
+
+    # LLM fallback
     try:
         from llm.prompts import LOCATOR_FALLBACK_PROMPT
         accessibility_tree = await page.accessibility.snapshot()
+        # Keep tree payload bounded so the fast model stays reliable
+        tree_json = json.dumps(accessibility_tree)
+        if len(tree_json) > 12000:
+            tree_json = tree_json[:12000] + "...(truncated)"
+
         prompt = LOCATOR_FALLBACK_PROMPT.format(
             semantic_label=element.semantic_label,
-            accessibility_tree_json=json.dumps(accessibility_tree, indent=2)
+            accessibility_tree_json=tree_json,
         )
         llm_result = await llm_client.generate(prompt, model="haiku", expect_json=True)
 
         strategy = llm_result.get("strategy", "css")
+        # Normalize aliases
+        if strategy == "label":
+            strategy = "aria_label"
         value = llm_result.get("value", "")
         role_name = llm_result.get("role_name", "")
 
-        if strategy == "role" and role_name:
-            fallback_spec = LocatorSpec(strategy="role", value=f"{role_name}:{value}", confidence=0.5)
+        if strategy == "role":
+            role = role_name or "textbox"
+            fallback_spec = LocatorSpec(
+                strategy="role",
+                value=f"{role}:{value}" if value else role,
+                confidence=0.5,
+            )
         else:
             fallback_spec = LocatorSpec(strategy=strategy, value=value, confidence=0.5)
 
-        loc = _build_playwright_locator(page, fallback_spec)
-        await expect(loc).to_be_visible(timeout=timeout_ms)
-        return (loc, "llm_fallback")
+        loc = await _try_spec(page, fallback_spec, timeout_ms, require_fillable)
+        if loc is not None:
+            return (loc, "llm_fallback")
+
+        # Last chance: if LLM returned plain text, try placeholder/label/textbox
+        if value:
+            for alt in (
+                LocatorSpec(strategy="placeholder", value=value, confidence=0.4),
+                LocatorSpec(strategy="aria_label", value=value, confidence=0.4),
+                LocatorSpec(strategy="role", value=f"textbox:{value}", confidence=0.4),
+            ):
+                loc = await _try_spec(page, alt, min(timeout_ms, 3000), require_fillable)
+                if loc is not None:
+                    return (loc, "llm_fallback")
+
+        raise ElementNotFoundError(
+            f"LLM fallback locator not visible for '{element.semantic_label}'"
+        )
+    except ElementNotFoundError:
+        raise
     except Exception as e:
         raise ElementNotFoundError(
             f"Could not find element '{element.semantic_label}': {e}"

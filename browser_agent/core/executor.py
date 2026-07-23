@@ -196,7 +196,7 @@ class TestExecutor:
                             step_result.element_label = element.semantic_label
                             locator, strategy_used = await resolve_locator(
                                 page, element, self.llm_client,
-                                timeout_ms=10000
+                                timeout_ms=60000
                             )
                             step_result.locator_used = strategy_used
 

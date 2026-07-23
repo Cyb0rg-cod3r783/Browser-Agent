@@ -98,11 +98,17 @@ Element to find: "{semantic_label}"
 Accessibility tree:
 {accessibility_tree_json}
 
+Rules:
+- Prefer interactive controls: textbox, searchbox, combobox, button, link, checkbox.
+- NEVER return strategy "text" for an input/field — that matches labels and cannot be filled.
+- For form fields prefer strategy "placeholder", "label", or "role" with role_name "textbox".
+- Use the visible accessible name / placeholder closely matching the semantic label (e.g. "Company code", "Company Code").
+
 Return ONLY this JSON structure:
 {{
-  "strategy": "role|text|label|placeholder|css",
-  "value": "the value to use with this strategy",
-  "role_name": "the role name if strategy is role (e.g. button, textbox, link)"
+  "strategy": "role|label|placeholder|css",
+  "value": "the value to use with this strategy (accessible name, placeholder, or css selector)",
+  "role_name": "textbox|button|link|combobox|searchbox (only if strategy is role)"
 }}
 """
 
@@ -126,23 +132,31 @@ Return ONLY this JSON structure:
 
 
 SEMANTIC_ASSERTION_PROMPT = """\
-You are an expert QA Engineer. Your job is to evaluate if the actual page state conceptually satisfies a test assertion, even if the exact strings do not match.
+You are an expert QA Engineer. Decide if the ACTUAL page state conceptually satisfies the assertion, even when wording differs.
 Return ONLY valid JSON (no preamble, no markdown fences).
 
+HARD RULES (never violate):
+- A Playwright timeout / "waiting for get_by_text" / "element(s) not found" is FAILURE evidence, NOT a conceptual match. If Actual Value describes a timeout and there is no Toast and no related validation text on the page, return passed: false.
+- Do NOT invent a pass. Only pass when there is positive evidence on the page or in a Toast.
+- If Actual Value starts with "Toast: '...'", compare the toast message to the expected validation/success meaning. Wording may differ ("Please Enter Email ID" ~= "Email address is Required").
+
 Guidelines for URL Comparison (url_contains):
-- A post-login redirection to a landing page path like "/home" is CONCEPTUALLY EQUIVALENT to "/dashboard" or "/index" for a happy path login flow. Mark it as passed (passed: true).
-- If the expected URL is "/login", and the actual URL is "/" (the root URL), check if the page is still the login page. If the page is showing a login form or stays on the login page root, this is CONCEPTUALLY EQUIVALENT to "/login" for a failed validation test. Mark it as passed (passed: true).
+- Post-login landing paths like "/home", "/dashboard", "/index", "/settings/..." are CONCEPTUALLY EQUIVALENT for a happy-path login.
+- For happy-path company/settings UPDATE flows: if expected is a hallucinated success path like "/company-registration-success" but the actual URL remains on "/settings/general/company" (or similar settings page) AND the user is NOT on /login, mark passed: true.
+- If expected is "/login" and actual is "/" while the login form is still shown, mark passed: true for negative login tests.
 
 Guidelines for Text/Element Comparison (element_visible / text_equals):
-- If the test expected "Welcome, admin" (indicating a successful login), and the visible page text snippet contains "Admin", "Assessor App", or "Dashboard", this indicates the user successfully logged in and reached the admin area. Mark it as passed (passed: true).
-- If the expected assertion value is "true" or "false" (due to a boolean generation error) but the element_label describes a validation message (e.g., "Email is required"), check the visible page text snippet. If there is a validation message or the user is still on the login page with fields highlighted, mark it as conceptually passed.
+- Prefer Toast text when present. Match by meaning for the SAME field (license/email/company code/website/domain/contact/name) and validation intent (required/invalid/max length/etc.).
+- Success assertions ("registered successfully", "saved", "updated") pass if a success toast appears OR the form page clearly reflects a completed update without an error toast.
+- If expected looks like a validation message but the page shows ONLY a login screen (no form, no toast), return passed: false — the session likely expired or navigation failed.
+- Boolean expected values ("true"/"false") for validation tests: if a relevant validation toast/message is visible for that field, mark passed: true.
 
 Context:
 - Test Case Name: {test_name}
 - Assertion Type: {assertion_type}
 - Expected Value: "{expected_value}"
 - Actual Value: "{actual_value}"
-- Visible Page Text Snippet (if text/element assertion):
+- Visible Page Text Snippet:
 \"\"\"
 {page_text}
 \"\"\"
